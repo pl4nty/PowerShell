@@ -2652,7 +2652,12 @@ namespace Microsoft.PowerShell.Commands
             Process result = null;
             try
             {
-                result = Process.Start(startInfo);
+                result = new Process() { StartInfo = startInfo };
+                if (!result.Start())
+                {
+                    // No new process was created (e.g. a URL protocol scheme activated an existing app instance).
+                    result = null;
+                }
             }
             catch (Win32Exception ex)
             {
