@@ -134,6 +134,10 @@ Describe "Start-Process" -Tag "Feature","RequireAdminOnWindows" {
         $process | Stop-Process
     }
 
+    It "Should start ms-settings URI with ShellExecute" -Skip:(!$isFullWin) {
+        Start-Process ms-settings: -PassThru
+    }
+
     It "Should be able to use the -WhatIf switch without performing the actual action" {
         $pingOutput = Join-Path $TestDrive "pingOutput.txt"
         { Start-Process -Wait $pingCommand -ArgumentList $pingParam -RedirectStandardOutput $pingOutput -WhatIf -ErrorAction Stop  @extraArgs} | Should -Not -Throw
