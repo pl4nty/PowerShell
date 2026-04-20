@@ -135,7 +135,8 @@ Describe "Start-Process" -Tag "Feature","RequireAdminOnWindows" {
     }
 
     It "Should start ms-settings URI with ShellExecute" -Skip:(!$isFullWin) {
-        Start-Process ms-settings: -PassThru
+        { Start-Process ms-settings: -PassThru } | Should -Not -Throw
+        Get-Process "SystemSettings" | Stop-Process
     }
 
     It "Should be able to use the -WhatIf switch without performing the actual action" {
