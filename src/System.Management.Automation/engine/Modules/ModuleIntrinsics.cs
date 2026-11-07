@@ -1449,6 +1449,21 @@ namespace System.Management.Automation
             // But if the file system provider isn't loaded, we will just check if the directory exists.
             if (context.EngineSessionState.IsProviderLoaded(context.ProviderNames.FileSystem))
             {
+                // A missing directory (e.g. $env:ProgramFiles\PowerShell\Modules, which isn't created by default)
+                // would throw ItemNotFoundException below; skip it without the exception.
+                if (Path.IsPathFullyQualified(trimmedenvPath) && !WildcardPattern.ContainsWildcardCharacters(trimmedenvPath))
+                {
+                    if (!Directory.Exists(trimmedenvPath))
+                    {
+                        return null;
+                    }
+
+                    // A plain absolute directory resolves to itself, so normalize it here rather than through the
+                    // provider, which is slow: every module import by name walks the whole PSModulePath.
+                    string normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(trimmedenvPath));
+                    return processedPathSet.Add(normalized) ? normalized : null;
+                }
+
                 ProviderInfo provider = null;
                 IEnumerable<string> resolvedPaths = null;
                 try

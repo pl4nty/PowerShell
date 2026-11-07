@@ -1519,6 +1519,14 @@ namespace System.Management.Automation
                     return false;
                 }
 
+                // amsi.dll on older Windows (e.g. Windows 10 22H2) doesn't export AmsiNotifyOperation;
+                // check once instead of taking an EntryPointNotFoundException on every startup
+                if (!s_hasAmsiNotifyOperation.Value)
+                {
+                    s_amsiNotifyFailed = true;
+                    return false;
+                }
+
                 try
                 {
                     if (!CheckAmsiInit())
@@ -1614,6 +1622,10 @@ namespace System.Management.Automation
 
         private static readonly bool s_amsiInitFailed = false;
         private static bool s_amsiNotifyFailed = false;
+
+        private static readonly Lazy<bool> s_hasAmsiNotifyOperation = new(
+            () => System.Management.Automation.Security.SystemPolicy.HasSystemExport("amsi.dll", "AmsiNotifyOperation"));
+
         private static readonly object s_amsiLockObject = new object();
 
         /// <summary>
