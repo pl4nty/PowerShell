@@ -603,8 +603,8 @@ namespace System.Management.Automation
         private static bool IsDynamicKeyword(Ast ast)
             => ast is CommandAst cmdAst && cmdAst.DefiningKeyword != null;
 
-        private static bool IsUsingTypes(Ast ast)
-            => ast is UsingStatementAst cmdAst && cmdAst.IsUsingModuleOrAssembly();
+        private static bool IsUsingModule(Ast ast)
+            => ast is UsingStatementAst cmdAst && cmdAst.UsingStatementKind == UsingStatementKind.Module;
 
         internal static void CacheScriptBlock(ScriptBlock scriptBlock, string fileName, string fileContents)
         {
@@ -615,13 +615,15 @@ namespace System.Management.Automation
 
             // Don't cache scriptblocks that have
             // a) dynamic keywords
-            // b) 'using module' or 'using assembly'
+            // b) 'using module'
             // The definition of the dynamic keyword could change, consequently changing how the source text should be parsed.
             // Exported types definitions from 'using module' could change, we need to do all parse-time checks again.
+            // 'using assembly' is fine: an assembly can't be unloaded, so parsing again would resolve types against the
+            // same loaded assembly (loading from the same path returns it), and its runtime part runs on every invocation.
             // TODO(sevoroby): we can optimize it to ignore 'using' if there are no actual type usage in locally defined types.
 
             // using is always a top-level statements in scriptBlock, we don't need to search in child blocks.
-            if (scriptBlock.Ast.Find(static ast => IsUsingTypes(ast), false) != null
+            if (scriptBlock.Ast.Find(static ast => IsUsingModule(ast), false) != null
                 || scriptBlock.Ast.Find(static ast => IsDynamicKeyword(ast), true) != null)
             {
                 return;

@@ -1785,6 +1785,41 @@ namespace Microsoft.PowerShell
         }
 
         /// <summary>
+        /// Parse PSReadLine's manifest and script module in the background, from where importing it by name will most
+        /// likely find it: the first of the default module paths with a PSReadLine folder, at its highest version.
+        /// A wrong guess costs nothing; the import just parses the files it does find.
+        /// </summary>
+        private static void PreloadPSReadLineModuleFiles()
+        {
+            foreach (string modulePath in new[] { ModuleIntrinsics.GetPersonalModulePath(), ModuleIntrinsics.GetSharedModulePath(), ModuleIntrinsics.GetPSHomeModulePath() })
+            {
+                string moduleBase = string.IsNullOrEmpty(modulePath) ? null : Path.Combine(modulePath, "PSReadLine");
+                if (moduleBase is null || !Directory.Exists(moduleBase))
+                {
+                    continue;
+                }
+
+                string versionBase = null;
+                Version highest = null;
+                foreach (string dir in Directory.EnumerateDirectories(moduleBase))
+                {
+                    if (Version.TryParse(Path.GetFileName(dir), out Version version)
+                        && (highest is null || version > highest)
+                        && File.Exists(Path.Combine(dir, "PSReadLine.psd1")))
+                    {
+                        highest = version;
+                        versionBase = dir;
+                    }
+                }
+
+                versionBase ??= moduleBase;
+                StartupScriptCache.Preload(Path.Combine(versionBase, "PSReadLine.psd1"), optimized: true);
+                StartupScriptCache.Preload(Path.Combine(versionBase, "PSReadLine.psm1"), optimized: null);
+                return;
+            }
+        }
+
+        /// <summary>
         /// Opens and Initializes the Host's sole Runspace.  Processes the startup scripts and runs any command passed on the
         /// command line.
         /// </summary>
@@ -1794,6 +1829,25 @@ namespace Microsoft.PowerShell
             Dbg.Assert(_runspaceRef == null, "_runspaceRef field should be null");
             Dbg.Assert(DefaultInitialSessionState != null, "DefaultInitialSessionState should not be null");
             s_runspaceInitTracer.WriteLine("Calling RunspaceFactory.CreateRunspace");
+
+            // Parse and compile the scripts this startup is about to run on background threads while the runspace opens:
+            // PSReadLine's module files and the profiles.
+            if (string.IsNullOrEmpty(args.ConfigurationFilePath) && string.IsNullOrEmpty(args.ConfigurationName))
+            {
+                if (LoadPSReadline())
+                {
+                    System.Threading.Tasks.Task.Run(PreloadPSReadLineModuleFiles);
+                }
+
+                if (!args.SkipProfiles)
+                {
+                    const string shellId = "Microsoft.PowerShell";
+                    StartupScriptCache.Preload(HostUtilities.GetFullProfileFileName(null, false), optimized: false);
+                    StartupScriptCache.Preload(HostUtilities.GetFullProfileFileName(shellId, false), optimized: false);
+                    StartupScriptCache.Preload(HostUtilities.GetFullProfileFileName(null, true), optimized: false);
+                    StartupScriptCache.Preload(HostUtilities.GetFullProfileFileName(shellId, true), optimized: false);
+                }
+            }
 
             // Use session configuration file if provided.
             bool customConfigurationProvided = false;
