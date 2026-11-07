@@ -45,6 +45,11 @@ namespace System.Management.Automation.Tracing
         }
 
         /// <summary>
+        /// Engine and provider lifecycle events are only written when an ETW session listens at this level and keyword.
+        /// </summary>
+        internal override bool LifecycleEventsEnabled => IsEnabled(PSLevel.Informational, PSKeyword.Cmdlets | PSKeyword.UseAlwaysAnalytic);
+
+        /// <summary>
         /// Provider interface function for logging health event.
         /// </summary>
         /// <param name="logContext"></param>
