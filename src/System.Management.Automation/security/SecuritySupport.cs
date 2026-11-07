@@ -1653,18 +1653,51 @@ namespace System.Management.Automation
             {
                 if ((s_amsiContext != IntPtr.Zero) && (s_amsiSession != IntPtr.Zero))
                 {
-                    lock (s_amsiLockObject)
+                    // Every new pipeline closes the session. If another thread is scanning (at startup, the profile
+                    // is compiled, and so scanned, in the background), leave the session open rather than wait for
+                    // that scan: the next pipeline's content is then correlated with it, and nothing goes
+                    // unscanned.
+                    if (!System.Threading.Monitor.TryEnter(s_amsiLockObject))
                     {
-                        // Clean up the session if one was open.
+                        return;
+                    }
+
+                    try
+                    {
+                        // Clean up the session if one was open. Closing a session that has content takes the AMSI
+                        // provider a while (it may analyze the session as a whole), so detach it here, letting the
+                        // next scan open a new one, and close it on a thread pool thread.
                         if ((s_amsiContext != IntPtr.Zero) && (s_amsiSession != IntPtr.Zero))
                         {
-                            AmsiNativeMethods.AmsiCloseSession(s_amsiContext, s_amsiSession);
+                            System.Threading.ThreadPool.UnsafeQueueUserWorkItem(
+                                static session => CloseDetachedSession(session),
+                                s_amsiSession,
+                                preferLocal: false);
                             s_amsiSession = IntPtr.Zero;
                         }
+                    }
+                    finally
+                    {
+                        System.Threading.Monitor.Exit(s_amsiLockObject);
                     }
                 }
             }
         }
+
+        private static void CloseDetachedSession(IntPtr session)
+        {
+            // Uninitializing AMSI takes this lock too, so a session detached just before then is left unclosed
+            // rather than closed against a freed context.
+            lock (s_amsiCloseLock)
+            {
+                if (s_amsiContext != IntPtr.Zero)
+                {
+                    AmsiNativeMethods.AmsiCloseSession(s_amsiContext, session);
+                }
+            }
+        }
+
+        private static readonly object s_amsiCloseLock = new object();
 
         /// <summary>
         /// Uninitialize the AMSI interface.
@@ -1683,17 +1716,24 @@ namespace System.Management.Automation
             {
                 lock (s_amsiLockObject)
                 {
-                    if (s_amsiContext != IntPtr.Zero)
+                    lock (s_amsiCloseLock)
                     {
-                        CloseSession();
+                        if (s_amsiContext != IntPtr.Zero)
+                        {
+                            if (s_amsiSession != IntPtr.Zero)
+                            {
+                                AmsiNativeMethods.AmsiCloseSession(s_amsiContext, s_amsiSession);
+                                s_amsiSession = IntPtr.Zero;
+                            }
 
-                        // Unregister the event handler.
-                        AppDomain.CurrentDomain.ProcessExit -= CurrentDomain_ProcessExit;
+                            // Unregister the event handler.
+                            AppDomain.CurrentDomain.ProcessExit -= CurrentDomain_ProcessExit;
 
-                        // Uninitialize the AMSI interface.
-                        AmsiCleanedUp = true;
-                        AmsiNativeMethods.AmsiUninitialize(s_amsiContext);
-                        s_amsiContext = IntPtr.Zero;
+                            // Uninitialize the AMSI interface.
+                            AmsiCleanedUp = true;
+                            AmsiNativeMethods.AmsiUninitialize(s_amsiContext);
+                            s_amsiContext = IntPtr.Zero;
+                        }
                     }
                 }
             }
