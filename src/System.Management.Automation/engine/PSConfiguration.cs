@@ -7,10 +7,13 @@ using System.IO;
 using System.Management.Automation.Internal;
 using System.Security;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Threading;
 
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+
+using StjException = System.Text.Json.JsonException;
 
 namespace System.Management.Automation.Configuration
 {
@@ -66,12 +69,26 @@ namespace System.Management.Automation.Configuration
         private readonly string perUserConfigFile;
         private readonly string perUserConfigDirectory;
 
-        // Note: JObject and JsonSerializer are thread safe.
         // Root Json objects corresponding to the configuration file for 'AllUsers' and 'CurrentUser' respectively.
         // They are used as a cache to avoid hitting the disk for every read operation.
-        private readonly JObject[] configRoots;
-        private readonly JObject emptyConfig;
-        private readonly JsonSerializer serializer;
+        // Reads use System.Text.Json, which is much cheaper to start than Newtonsoft.Json: the first read happens
+        // early in every pwsh startup. Newtonsoft.Json is only loaded to write the file, or to convert a value
+        // that isn't a string, bool or string array (e.g. PowerShellPolicies), keeping its conversion semantics.
+        private readonly JsonObject[] configRoots;
+        private readonly JsonObject emptyConfig;
+        private JsonSerializer serializer;
+
+        private static readonly JsonNodeOptions s_nodeOptions = new() { PropertyNameCaseInsensitive = true };
+        private static readonly System.Text.Json.JsonDocumentOptions s_documentOptions = new()
+        {
+            AllowTrailingCommas = true,
+            CommentHandling = System.Text.Json.JsonCommentHandling.Skip,
+            MaxDepth = 10,
+        };
+
+        private JsonSerializer Serializer => LazyInitializer.EnsureInitialized(
+            ref serializer,
+            () => JsonSerializer.Create(new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.None, MaxDepth = 10 }));
 
         /// <summary>
         /// Lock used to enable multiple concurrent readers and singular write locks within a single process.
@@ -95,9 +112,8 @@ namespace System.Management.Automation.Configuration
                 perUserConfigFile = Path.Combine(perUserConfigDirectory, ConfigFileName);
             }
 
-            emptyConfig = new JObject();
-            configRoots = new JObject[2];
-            serializer = JsonSerializer.Create(new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.None, MaxDepth = 10 });
+            emptyConfig = new JsonObject();
+            configRoots = new JsonObject[2];
 
             fileLock = new ReaderWriterLockSlim();
         }
@@ -396,7 +412,7 @@ namespace System.Management.Automation.Configuration
                 return defaultValue;
             }
 
-            JObject configData = configRoots[(int)scope];
+            JsonObject configData = configRoots[(int)scope];
 
             if (configData == null)
             {
@@ -408,13 +424,18 @@ namespace System.Management.Automation.Configuration
                         fileLock.EnterReadLock();
 
                         using var stream = OpenFileStreamWithRetry(fileName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                        using var jsonReader = new JsonTextReader(new StreamReader(stream));
 
-                        configData = serializer.Deserialize<JObject>(jsonReader) ?? emptyConfig;
+                        // an empty file reads as no settings, as it did with Newtonsoft.Json
+                        configData = stream.Length == 0
+                            ? emptyConfig
+                            : JsonNode.Parse(stream, s_nodeOptions, s_documentOptions) as JsonObject ?? emptyConfig;
+
+                        // JsonNode builds its children lazily, which isn't thread safe; build them all before sharing the cache
+                        Materialize(configData);
                     }
                     catch (Exception exc) when (
                         scope == ConfigScope.CurrentUser &&
-                        (exc is IOException || exc is UnauthorizedAccessException || exc is SecurityException || exc is JsonException))
+                        (exc is IOException || exc is UnauthorizedAccessException || exc is SecurityException || exc is StjException))
                     {
                         // The per-user configuration file is unreadable (e.g. OneDrive cloud file provider
                         // not running, permission denied, ACL denied, or corrupt/malformed JSON). Rather
@@ -444,18 +465,18 @@ namespace System.Management.Automation.Configuration
                 }
 
                 // Set the configuration cache.
-                JObject originalValue = Interlocked.CompareExchange(ref configRoots[(int)scope], configData, null);
+                JsonObject originalValue = Interlocked.CompareExchange(ref configRoots[(int)scope], configData, null);
                 if (originalValue != null)
                 {
                     configData = originalValue;
                 }
             }
 
-            if (configData != emptyConfig && configData.TryGetValue(key, StringComparison.OrdinalIgnoreCase, out JToken jToken))
+            if (configData != emptyConfig && configData.TryGetPropertyValue(key, out JsonNode node))
             {
                 try
                 {
-                    return jToken.ToObject<T>(serializer) ?? defaultValue;
+                    return ConvertConfigValue<T>(node) ?? defaultValue;
                 }
                 catch (JsonException exc) when (scope == ConfigScope.CurrentUser)
                 {
@@ -471,6 +492,64 @@ namespace System.Management.Automation.Configuration
             }
 
             return defaultValue;
+        }
+
+        private static void Materialize(JsonNode node)
+        {
+            if (node is JsonObject obj)
+            {
+                foreach (KeyValuePair<string, JsonNode> property in obj)
+                {
+                    Materialize(property.Value);
+                }
+            }
+            else if (node is JsonArray array)
+            {
+                foreach (JsonNode item in array)
+                {
+                    Materialize(item);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Convert a config value read with System.Text.Json to <typeparamref name="T"/>.
+        /// Strings, bools and string arrays (all the settings read at startup) are converted directly;
+        /// anything else goes through Newtonsoft.Json so conversions behave as they always have.
+        /// </summary>
+        private T ConvertConfigValue<T>(JsonNode node)
+        {
+            if (node is null)
+            {
+                return default;
+            }
+
+            if (typeof(T) == typeof(string) && node is JsonValue stringValue && stringValue.TryGetValue(out string text))
+            {
+                return (T)(object)text;
+            }
+
+            if (typeof(T) == typeof(bool?) && node is JsonValue boolValue && boolValue.TryGetValue(out bool flag))
+            {
+                return (T)(object)flag;
+            }
+
+            if (typeof(T) == typeof(string[]) && node is JsonArray array)
+            {
+                var items = new string[array.Count];
+                bool allStrings = true;
+                for (int i = 0; i < items.Length && allStrings; i++)
+                {
+                    allStrings = array[i] is JsonValue item && item.TryGetValue(out items[i]);
+                }
+
+                if (allStrings)
+                {
+                    return (T)(object)items;
+                }
+            }
+
+            return JToken.Parse(node.ToJsonString()).ToObject<T>(Serializer);
         }
 
         /// <summary>
@@ -550,7 +629,7 @@ namespace System.Management.Automation.Configuration
                     if (isReadSuccess)
                     {
                         // Read the stream into a root JObject for manipulation
-                        jsonObject = serializer.Deserialize<JObject>(jsonReader);
+                        jsonObject = Serializer.Deserialize<JObject>(jsonReader);
                         JProperty propertyToModify = jsonObject.Property(key);
 
                         if (propertyToModify == null)
@@ -610,8 +689,8 @@ namespace System.Management.Automation.Configuration
                     fs.SetLength(fs.Position);
                 }
 
-                // Refresh the configuration cache.
-                Interlocked.Exchange(ref configRoots[(int)scope], jsonObject);
+                // Refresh the configuration cache: the next read parses the file again.
+                Interlocked.Exchange(ref configRoots[(int)scope], null);
             }
             finally
             {
