@@ -38,6 +38,13 @@ namespace Microsoft.PowerShell
             return Start(args, argc);
         }
 
+        private const long StartupNoGCRegionSize = 64 * 1024 * 1024;
+
+        /// <summary>
+        /// Whether startup is running in a no-GC region, which ConsoleHost ends once the first command line is read.
+        /// </summary>
+        internal static bool StartupNoGCRegion;
+
         /// <summary>
         /// Starts PowerShell.
         /// </summary>
@@ -50,6 +57,12 @@ namespace Microsoft.PowerShell
         public static int Start([MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPWStr, SizeParamIndex = 1)] string[] args, int argc)
         {
             ArgumentNullException.ThrowIfNull(args);
+
+            // Startup allocates enough for the default gen0 budget to collect several times, and those pauses
+            // add up. Suspend collection until the first command line is read (ConsoleHost ends the region);
+            // past this size the region ends by itself and collection carries on as normal.
+            // (Kept out of ConsoleHost, so its type initializer doesn't run before the culture is set below.)
+            StartupNoGCRegion = GC.TryStartNoGCRegion(StartupNoGCRegionSize);
 
 #if DEBUG
             if (args.Length > 0 && !string.IsNullOrEmpty(args[0]) && args[0]!.Equals("-isswait", StringComparison.OrdinalIgnoreCase))

@@ -343,6 +343,27 @@ namespace Microsoft.PowerShell
             }
         }
 
+        /// <summary>
+        /// Ends the no-GC region started at entry, if it hasn't ended by itself.
+        /// </summary>
+        private static void EndStartupNoGCRegion()
+        {
+            if (!UnmanagedPSEntry.StartupNoGCRegion)
+            {
+                return;
+            }
+
+            UnmanagedPSEntry.StartupNoGCRegion = false;
+            try
+            {
+                GC.EndNoGCRegion();
+            }
+            catch (InvalidOperationException)
+            {
+                // Startup allocated past the region's size, which already ended it.
+            }
+        }
+
         internal static void ParseCommandLine(string[] args)
         {
             s_cpp.Parse(args);
@@ -2661,6 +2682,7 @@ namespace Microsoft.PowerShell
                         previousResponseWasEmpty = false;
                         // There could be a profile. So there could be a user defined custom readline command
                         line = ui.ReadLineWithTabCompletion(_exec);
+                        EndStartupNoGCRegion();
 
                         // line will be null in the case that Ctrl-C terminated the input
 
