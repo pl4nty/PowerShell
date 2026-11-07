@@ -496,7 +496,15 @@ namespace System.Management.Automation.Internal
         /// <param name="path">The path to the file in question.</param>
         /// <param name="handle">A file handle to the file in question, if available.</param>
         [SuppressMessage("Microsoft.Reliability", "CA2001:AvoidCallingProblematicMethods")]
-        internal static SaferPolicy GetSaferPolicy(string path, SafeHandle handle)
+        internal static SaferPolicy GetSaferPolicy(string path, SafeHandle handle) => GetSaferPolicy(path, handle, pathRulesOnly: false);
+
+        /// <summary>
+        /// Gets the SAFER (AppLocker or software restriction) policy for a file. With <paramref name="pathRulesOnly"/>,
+        /// it's identified by its path alone, skipping the Authenticode check (slow the first time: it loads the
+        /// trust providers and looks the file up in the catalogs) and the hash: for a file just written with unique,
+        /// unsigned content, as the system-wide policy test does, no publisher or hash rule can match either way.
+        /// </summary>
+        internal static SaferPolicy GetSaferPolicy(string path, SafeHandle handle, bool pathRulesOnly)
         {
             SaferPolicy status = SaferPolicy.Allowed;
 
@@ -510,10 +518,11 @@ namespace System.Management.Automation.Internal
 
             // Prepare the code properties struct.
             codeProperties.cbSize = (uint)Marshal.SizeOf(typeof(SAFER_CODE_PROPERTIES));
-            codeProperties.dwCheckFlags = (
-                NativeConstants.SAFER_CRITERIA_IMAGEPATH |
-                NativeConstants.SAFER_CRITERIA_IMAGEHASH |
-                NativeConstants.SAFER_CRITERIA_AUTHENTICODE);
+            codeProperties.dwCheckFlags = pathRulesOnly
+                ? (uint)NativeConstants.SAFER_CRITERIA_IMAGEPATH
+                : (uint)(NativeConstants.SAFER_CRITERIA_IMAGEPATH |
+                    NativeConstants.SAFER_CRITERIA_IMAGEHASH |
+                    NativeConstants.SAFER_CRITERIA_AUTHENTICODE);
             codeProperties.ImagePath = path;
 
             if (handle != null)

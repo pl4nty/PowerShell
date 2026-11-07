@@ -12,6 +12,8 @@ using System.Management.Automation.Internal;
 using System.Management.Automation.Runspaces;
 using System.Management.Automation.Tracing;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace System.Management.Automation.Security
 {
@@ -237,7 +239,23 @@ namespace System.Management.Automation.Security
             {
                 lock (s_systemLockdownPolicyLock)
                 {
-                    s_systemLockdownPolicy ??= GetLockdownPolicy(path: null, handle: null);
+                    if (s_systemLockdownPolicy == null)
+                    {
+                        // The WDAC query and the AppLocker test (writing two scripts and asking SAFER
+                        // about one) don't depend on each other, so run the AppLocker one alongside. Both cache their
+                        // system-wide results, which GetLockdownPolicy then combines as before.
+                        Task appLockerPolicy = s_cachedSaferSystemPolicy is null
+                            ? Task.Factory.StartNew(
+                                static () => GetAppLockerPolicy(path: null, handle: null),
+                                CancellationToken.None,
+                                TaskCreationOptions.LongRunning,
+                                TaskScheduler.Default)
+                            : null;
+                        GetWldpPolicy(path: null, handle: null);
+                        appLockerPolicy?.GetAwaiter().GetResult();
+
+                        s_systemLockdownPolicy = GetLockdownPolicy(path: null, handle: null);
+                    }
                 }
             }
             else if (s_allowDebugOverridePolicy)
@@ -663,10 +681,10 @@ namespace System.Management.Automation.Security
 
         private static SaferPolicy TestSaferPolicy(string testPathScript, string testPathModule)
         {
-            SaferPolicy result = SecuritySupport.GetSaferPolicy(testPathScript, null);
+            SaferPolicy result = SecuritySupport.GetSaferPolicy(testPathScript, null, pathRulesOnly: true);
             if (result == SaferPolicy.Disallowed)
             {
-                result = SecuritySupport.GetSaferPolicy(testPathModule, null);
+                result = SecuritySupport.GetSaferPolicy(testPathModule, null, pathRulesOnly: true);
             }
 
             return result;
