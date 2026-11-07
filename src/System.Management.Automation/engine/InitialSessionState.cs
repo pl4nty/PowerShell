@@ -3611,6 +3611,13 @@ namespace System.Management.Automation.Runspaces
 
             if (!updateOnly)
             {
+                // The first runspace usually takes the type table startup built in the background
+                if (StartupTypeAndFormatData.TryTakeTypeTable(Types) is TypeTable prebuilt)
+                {
+                    context.TypeTable = prebuilt;
+                    return;
+                }
+
                 context.TypeTable.Clear();
             }
 
@@ -3762,7 +3769,15 @@ namespace System.Management.Automation.Runspaces
 
             if (entries.Count > 0)
             {
-                context.FormatDBManager.UpdateDataBase(entries, context.AuthorizationManager, context.EngineHostInterface, true);
+                // The first runspace usually takes the format database startup built in the background
+                if (!update && StartupTypeAndFormatData.TryTakeFormatDatabase(entries) is Microsoft.PowerShell.Commands.Internal.Format.TypeInfoDataBaseManager prebuilt)
+                {
+                    context.FormatDBManager = prebuilt;
+                }
+                else
+                {
+                    context.FormatDBManager.UpdateDataBase(entries, context.AuthorizationManager, context.EngineHostInterface, true);
+                }
 
                 var allErrors = new StringBuilder("\n");
                 bool hasErrors = false;

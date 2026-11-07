@@ -490,12 +490,31 @@ namespace Microsoft.PowerShell.Commands.Internal.Format
             return new Tuple<bool, TypeGenerator>(isForHelp, generator);
         }
 
+        /// <summary>
+        /// Whether <paramref name="path"/> is one of the format files built into PowerShell, which load without
+        /// reading the file or checking its signature.
+        /// </summary>
+        internal static bool IsBuiltinFormatFile(string path)
+        {
+            return GetBuiltinGenerators().ContainsKey(path);
+        }
+
         private static bool ProcessBuiltin(
             PSSnapInTypeAndFormatErrors file,
             TypeInfoDataBase db,
             PSPropertyExpressionFactory expressionFactory,
             List<XmlLoaderLoggerEntry> logEntries,
             ref bool success)
+        {
+            Tuple<bool, TypeGenerator> generator;
+            if (!GetBuiltinGenerators().TryGetValue(file.FullPath, out generator))
+                return false;
+
+            ProcessBuiltinFormatViewDefinitions(generator.Item2(), db, expressionFactory, file, logEntries, generator.Item1, ref success);
+            return true;
+        }
+
+        private static Dictionary<string, Tuple<bool, TypeGenerator>> GetBuiltinGenerators()
         {
             if (s_builtinGenerators == null)
             {
@@ -518,12 +537,7 @@ namespace Microsoft.PowerShell.Commands.Internal.Format
                 Interlocked.CompareExchange(ref s_builtinGenerators, builtInGenerators, null);
             }
 
-            Tuple<bool, TypeGenerator> generator;
-            if (!s_builtinGenerators.TryGetValue(file.FullPath, out generator))
-                return false;
-
-            ProcessBuiltinFormatViewDefinitions(generator.Item2(), db, expressionFactory, file, logEntries, generator.Item1, ref success);
-            return true;
+            return s_builtinGenerators;
         }
 
         private static void ProcessBuiltinFormatViewDefinitions(

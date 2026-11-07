@@ -120,7 +120,9 @@ namespace Microsoft.PowerShell
             {
                 Thread.CurrentThread.CurrentUICulture = NativeCultureResolver.UICulture;
                 Thread.CurrentThread.CurrentCulture = NativeCultureResolver.Culture;
-                return InitialSessionState.CreateDefault2();
+                InitialSessionState iss = InitialSessionState.CreateDefault2();
+                StartupTypeAndFormatData.Start(iss);
+                return iss;
             }
 
             ConsoleHost.ParseCommandLine(args);

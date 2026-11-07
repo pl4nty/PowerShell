@@ -4725,6 +4725,17 @@ namespace System.Management.Automation.Runspaces
             }
         }
 
+        /// <summary>
+        /// Whether <paramref name="filePath"/> is one of the type files built into PowerShell, which load without
+        /// reading the file or checking its signature.
+        /// </summary>
+        internal static bool IsBuiltInTypesFile(string filePath)
+        {
+            return string.Equals(TypesFilePath, filePath, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(TypesV3FilePath, filePath, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(GetEventTypesFilePath, filePath, StringComparison.OrdinalIgnoreCase);
+        }
+
         private bool ProcessIsBuiltIn(string filePath, ConcurrentBag<string> errors, out bool failToLoadFile)
         {
             var result = false;
