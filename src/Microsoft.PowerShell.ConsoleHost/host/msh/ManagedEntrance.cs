@@ -12,6 +12,7 @@ using System.Management.Automation.Runspaces;
 using System.Management.Automation.Tracing;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Microsoft.PowerShell
 {
@@ -39,6 +40,23 @@ namespace Microsoft.PowerShell
         }
 
         private const long StartupNoGCRegionSize = 64 * 1024 * 1024;
+
+        /// <summary>
+        /// Whether the arguments might include -SettingsFile, matching the parser's prefixes and switch characters loosely.
+        /// </summary>
+        private static bool MayUseSettingsFile(string[] args)
+        {
+            foreach (string arg in args)
+            {
+                ReadOnlySpan<char> name = arg.AsSpan().TrimStart("-/–—―");
+                if (name.StartsWith("se", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
 
         /// <summary>
         /// Whether startup is running in a no-GC region, which ConsoleHost ends once the first command line is read.
@@ -89,6 +107,22 @@ namespace Microsoft.PowerShell
             Thread.CurrentThread.CurrentUICulture = NativeCultureResolver.UICulture;
             Thread.CurrentThread.CurrentCulture = NativeCultureResolver.Culture;
 
+            // Create the default session state on another thread while the command line is parsed.
+            // Not with -SettingsFile, which changes the configuration that creating it reads. On its own thread,
+            // since the main thread soon waits for it and the pool is busy with warm-ups.
+            Task<InitialSessionState>? defaultSessionState = MayUseSettingsFile(args) ? null : Task.Factory.StartNew(
+                CreateDefaultSessionState,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+
+            static InitialSessionState CreateDefaultSessionState()
+            {
+                Thread.CurrentThread.CurrentUICulture = NativeCultureResolver.UICulture;
+                Thread.CurrentThread.CurrentCulture = NativeCultureResolver.Culture;
+                return InitialSessionState.CreateDefault2();
+            }
+
             ConsoleHost.ParseCommandLine(args);
 
             // NOTE: On Unix, logging depends on a command line parsing
@@ -104,7 +138,7 @@ namespace Microsoft.PowerShell
                     ManagedEntranceStrings.ShellBannerPowerShell,
                     PSVersionInfo.GitCommitId);
 
-                ConsoleHost.DefaultInitialSessionState = InitialSessionState.CreateDefault2();
+                ConsoleHost.DefaultInitialSessionState = defaultSessionState?.GetAwaiter().GetResult() ?? InitialSessionState.CreateDefault2();
 
                 exitCode = ConsoleHost.Start(
                     bannerText: banner,
