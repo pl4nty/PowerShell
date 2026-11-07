@@ -316,8 +316,13 @@ namespace Microsoft.PowerShell
                 s_theConsoleHost.BindBreakHandler();
                 IsStdOutputRedirected = Console.IsOutputRedirected;
 
-                // Send startup telemetry for ConsoleHost startup
-                ApplicationInsightsTelemetry.SendPSCoreStartupTelemetry("Normal", s_cpp.ParametersUsedAsDouble);
+                // Send startup telemetry for ConsoleHost startup on the thread pool: initializing the
+                // telemetry client is slow, and nothing waits for the event.
+                double parametersUsed = s_cpp.ParametersUsedAsDouble;
+                ThreadPool.UnsafeQueueUserWorkItem(
+                    static parameters => ApplicationInsightsTelemetry.SendPSCoreStartupTelemetry("Normal", parameters),
+                    parametersUsed,
+                    preferLocal: false);
 
                 return unchecked((int)s_theConsoleHost.Run(s_cpp, false));
             }
