@@ -12,6 +12,8 @@ using System.Management.Automation.Internal;
 using System.Management.Automation.Runspaces;
 using System.Management.Automation.Tracing;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace System.Management.Automation.Security
 {
@@ -116,8 +118,33 @@ namespace System.Management.Automation.Security
             return result;
         }
 
+        // Older Windows (e.g. Windows 10 22H2) doesn't export WldpGetApplicationSettingBoolean. Check for the export
+        // instead of catching EntryPointNotFoundException, which costs a first-chance exception on every startup.
+        private static readonly bool s_hasWldpGetApplicationSettingBoolean = HasSystemExport("wldp.dll", "WldpGetApplicationSettingBoolean");
+
+        /// <summary>
+        /// Whether a DLL in System32 exports a function, without throwing when it doesn't.
+        /// </summary>
+        internal static bool HasSystemExport(string library, string export)
+        {
+            return NativeLibrary.TryLoad(library, typeof(SystemPolicy).Assembly, DllImportSearchPath.System32, out IntPtr handle)
+                && NativeLibrary.TryGetExport(handle, export, out _);
+        }
+
         private static bool SafeWldpGetApplicationSettingBoolean(string settingName)
         {
+            if (!s_hasWldpGetApplicationSettingBoolean)
+            {
+                // COR_E_ENTRYPOINTNOTFOUND, as the exception path below would log
+                PSEtwLog.LogWDACQueryEvent(
+                    "WldpGetApplicationSettingBoolean_Failed",
+                    settingName,
+                    unchecked((int)0x80131523),
+                    0);
+
+                return false;
+            }
+
             try
             {
                 int hr = WldpNativeMethods.WldpGetApplicationSettingBoolean(
@@ -212,7 +239,23 @@ namespace System.Management.Automation.Security
             {
                 lock (s_systemLockdownPolicyLock)
                 {
-                    s_systemLockdownPolicy ??= GetLockdownPolicy(path: null, handle: null);
+                    if (s_systemLockdownPolicy == null)
+                    {
+                        // The WDAC query and the AppLocker test (writing two scripts and asking SAFER
+                        // about one) don't depend on each other, so run the AppLocker one alongside. Both cache their
+                        // system-wide results, which GetLockdownPolicy then combines as before.
+                        Task appLockerPolicy = s_cachedSaferSystemPolicy is null
+                            ? Task.Factory.StartNew(
+                                static () => GetAppLockerPolicy(path: null, handle: null),
+                                CancellationToken.None,
+                                TaskCreationOptions.LongRunning,
+                                TaskScheduler.Default)
+                            : null;
+                        GetWldpPolicy(path: null, handle: null);
+                        appLockerPolicy?.GetAwaiter().GetResult();
+
+                        s_systemLockdownPolicy = GetLockdownPolicy(path: null, handle: null);
+                    }
                 }
             }
             else if (s_allowDebugOverridePolicy)
@@ -638,10 +681,10 @@ namespace System.Management.Automation.Security
 
         private static SaferPolicy TestSaferPolicy(string testPathScript, string testPathModule)
         {
-            SaferPolicy result = SecuritySupport.GetSaferPolicy(testPathScript, null);
+            SaferPolicy result = SecuritySupport.GetSaferPolicy(testPathScript, null, pathRulesOnly: true);
             if (result == SaferPolicy.Disallowed)
             {
-                result = SecuritySupport.GetSaferPolicy(testPathModule, null);
+                result = SecuritySupport.GetSaferPolicy(testPathModule, null, pathRulesOnly: true);
             }
 
             return result;

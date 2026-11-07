@@ -665,6 +665,31 @@ namespace Microsoft.PowerShell.Telemetry
         /// <param name="moduleInfo">The module to report. If it is not allowed, then it is set to 'anonymous'.</param>
         internal static void SendModuleTelemetryMetric(TelemetryType telemetryType, PSModuleInfo moduleInfo)
         {
+            // Off the calling thread: the first metric creates the metric manager (and may wait for this class's
+            // initializer, which the startup event runs on the thread pool), which would hold up module imports.
+            string moduleName;
+            Version moduleVersion;
+            string[] moduleTags;
+            try
+            {
+                moduleName = moduleInfo.Name;
+                moduleVersion = moduleInfo.Version;
+                moduleTags = moduleInfo.Tags.ToArray();
+            }
+            catch
+            {
+                // Ignore errors.
+                return;
+            }
+
+            ThreadPool.UnsafeQueueUserWorkItem(
+                static state => SendModuleTelemetryMetricCore(state.telemetryType, state.moduleName, state.moduleVersion, state.moduleTags),
+                (telemetryType, moduleName, moduleVersion, moduleTags),
+                preferLocal: false);
+        }
+
+        private static void SendModuleTelemetryMetricCore(TelemetryType telemetryType, string moduleName, Version moduleVersion, string[] moduleTags)
+        {
             if (!CanSendTelemetry)
             {
                 return;
@@ -675,9 +700,9 @@ namespace Microsoft.PowerShell.Telemetry
             // be handled in the telemetry query.
             try
             {
-                string allowedModuleName = GetModuleName(moduleInfo.Name);
-                string allowedModuleVersion = allowedModuleName == Anonymous ? AnonymousVersion : moduleInfo.Version?.ToString();
-                var allowedModuleTags = moduleInfo.Tags.Where(t => s_knownModuleTags.Contains(t)).Distinct();
+                string allowedModuleName = GetModuleName(moduleName);
+                string allowedModuleVersion = allowedModuleName == Anonymous ? AnonymousVersion : moduleVersion?.ToString();
+                var allowedModuleTags = moduleTags.Where(t => s_knownModuleTags.Contains(t)).Distinct();
                 string allowedModuleTagString = allowedModuleTags.Any() ? string.Join(',', allowedModuleTags) : NoTag;
 
                 s_telemetryClient.
@@ -699,6 +724,14 @@ namespace Microsoft.PowerShell.Telemetry
         /// <param name="telemetryType">The type of telemetry that we'll be sending.</param>
         /// <param name="moduleName">The module name to report. If it is not allowed, then it is set to 'anonymous'.</param>
         internal static void SendModuleTelemetryMetric(TelemetryType telemetryType, string moduleName)
+        {
+            ThreadPool.UnsafeQueueUserWorkItem(
+                static state => SendModuleTelemetryMetricCore(state.telemetryType, state.moduleName),
+                (telemetryType, moduleName),
+                preferLocal: false);
+        }
+
+        private static void SendModuleTelemetryMetricCore(TelemetryType telemetryType, string moduleName)
         {
             if (!CanSendTelemetry)
             {
@@ -723,6 +756,15 @@ namespace Microsoft.PowerShell.Telemetry
         /// <param name="data">The specific details about the telemetry.</param>
         /// <param name="value">The count of instances for the telemetry payload.</param>
         internal static void SendTelemetryMetric(TelemetryType metricId, string data, double value = 1.0)
+        {
+            // Off the calling thread, like module metrics: every PowerShell instance sends one when it's created.
+            ThreadPool.UnsafeQueueUserWorkItem(
+                static state => SendTelemetryMetricCore(state.metricId, state.data, state.value),
+                (metricId, data, value),
+                preferLocal: false);
+        }
+
+        private static void SendTelemetryMetricCore(TelemetryType metricId, string data, double value)
         {
             if (!CanSendTelemetry)
             {

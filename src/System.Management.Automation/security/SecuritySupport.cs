@@ -496,7 +496,15 @@ namespace System.Management.Automation.Internal
         /// <param name="path">The path to the file in question.</param>
         /// <param name="handle">A file handle to the file in question, if available.</param>
         [SuppressMessage("Microsoft.Reliability", "CA2001:AvoidCallingProblematicMethods")]
-        internal static SaferPolicy GetSaferPolicy(string path, SafeHandle handle)
+        internal static SaferPolicy GetSaferPolicy(string path, SafeHandle handle) => GetSaferPolicy(path, handle, pathRulesOnly: false);
+
+        /// <summary>
+        /// Gets the SAFER (AppLocker or software restriction) policy for a file. With <paramref name="pathRulesOnly"/>,
+        /// it's identified by its path alone, skipping the Authenticode check (slow the first time: it loads the
+        /// trust providers and looks the file up in the catalogs) and the hash: for a file just written with unique,
+        /// unsigned content, as the system-wide policy test does, no publisher or hash rule can match either way.
+        /// </summary>
+        internal static SaferPolicy GetSaferPolicy(string path, SafeHandle handle, bool pathRulesOnly)
         {
             SaferPolicy status = SaferPolicy.Allowed;
 
@@ -510,10 +518,11 @@ namespace System.Management.Automation.Internal
 
             // Prepare the code properties struct.
             codeProperties.cbSize = (uint)Marshal.SizeOf(typeof(SAFER_CODE_PROPERTIES));
-            codeProperties.dwCheckFlags = (
-                NativeConstants.SAFER_CRITERIA_IMAGEPATH |
-                NativeConstants.SAFER_CRITERIA_IMAGEHASH |
-                NativeConstants.SAFER_CRITERIA_AUTHENTICODE);
+            codeProperties.dwCheckFlags = pathRulesOnly
+                ? (uint)NativeConstants.SAFER_CRITERIA_IMAGEPATH
+                : (uint)(NativeConstants.SAFER_CRITERIA_IMAGEPATH |
+                    NativeConstants.SAFER_CRITERIA_IMAGEHASH |
+                    NativeConstants.SAFER_CRITERIA_AUTHENTICODE);
             codeProperties.ImagePath = path;
 
             if (handle != null)
@@ -1519,6 +1528,14 @@ namespace System.Management.Automation
                     return false;
                 }
 
+                // amsi.dll on older Windows (e.g. Windows 10 22H2) doesn't export AmsiNotifyOperation;
+                // check once instead of taking an EntryPointNotFoundException on every startup
+                if (!s_hasAmsiNotifyOperation.Value)
+                {
+                    s_amsiNotifyFailed = true;
+                    return false;
+                }
+
                 try
                 {
                     if (!CheckAmsiInit())
@@ -1614,6 +1631,10 @@ namespace System.Management.Automation
 
         private static readonly bool s_amsiInitFailed = false;
         private static bool s_amsiNotifyFailed = false;
+
+        private static readonly Lazy<bool> s_hasAmsiNotifyOperation = new(
+            () => System.Management.Automation.Security.SystemPolicy.HasSystemExport("amsi.dll", "AmsiNotifyOperation"));
+
         private static readonly object s_amsiLockObject = new object();
 
         /// <summary>
@@ -1632,18 +1653,51 @@ namespace System.Management.Automation
             {
                 if ((s_amsiContext != IntPtr.Zero) && (s_amsiSession != IntPtr.Zero))
                 {
-                    lock (s_amsiLockObject)
+                    // Every new pipeline closes the session. If another thread is scanning (at startup, the profile
+                    // is compiled, and so scanned, in the background), leave the session open rather than wait for
+                    // that scan: the next pipeline's content is then correlated with it, and nothing goes
+                    // unscanned.
+                    if (!System.Threading.Monitor.TryEnter(s_amsiLockObject))
                     {
-                        // Clean up the session if one was open.
+                        return;
+                    }
+
+                    try
+                    {
+                        // Clean up the session if one was open. Closing a session that has content takes the AMSI
+                        // provider a while (it may analyze the session as a whole), so detach it here, letting the
+                        // next scan open a new one, and close it on a thread pool thread.
                         if ((s_amsiContext != IntPtr.Zero) && (s_amsiSession != IntPtr.Zero))
                         {
-                            AmsiNativeMethods.AmsiCloseSession(s_amsiContext, s_amsiSession);
+                            System.Threading.ThreadPool.UnsafeQueueUserWorkItem(
+                                static session => CloseDetachedSession(session),
+                                s_amsiSession,
+                                preferLocal: false);
                             s_amsiSession = IntPtr.Zero;
                         }
+                    }
+                    finally
+                    {
+                        System.Threading.Monitor.Exit(s_amsiLockObject);
                     }
                 }
             }
         }
+
+        private static void CloseDetachedSession(IntPtr session)
+        {
+            // Uninitializing AMSI takes this lock too, so a session detached just before then is left unclosed
+            // rather than closed against a freed context.
+            lock (s_amsiCloseLock)
+            {
+                if (s_amsiContext != IntPtr.Zero)
+                {
+                    AmsiNativeMethods.AmsiCloseSession(s_amsiContext, session);
+                }
+            }
+        }
+
+        private static readonly object s_amsiCloseLock = new object();
 
         /// <summary>
         /// Uninitialize the AMSI interface.
@@ -1662,17 +1716,24 @@ namespace System.Management.Automation
             {
                 lock (s_amsiLockObject)
                 {
-                    if (s_amsiContext != IntPtr.Zero)
+                    lock (s_amsiCloseLock)
                     {
-                        CloseSession();
+                        if (s_amsiContext != IntPtr.Zero)
+                        {
+                            if (s_amsiSession != IntPtr.Zero)
+                            {
+                                AmsiNativeMethods.AmsiCloseSession(s_amsiContext, s_amsiSession);
+                                s_amsiSession = IntPtr.Zero;
+                            }
 
-                        // Unregister the event handler.
-                        AppDomain.CurrentDomain.ProcessExit -= CurrentDomain_ProcessExit;
+                            // Unregister the event handler.
+                            AppDomain.CurrentDomain.ProcessExit -= CurrentDomain_ProcessExit;
 
-                        // Uninitialize the AMSI interface.
-                        AmsiCleanedUp = true;
-                        AmsiNativeMethods.AmsiUninitialize(s_amsiContext);
-                        s_amsiContext = IntPtr.Zero;
+                            // Uninitialize the AMSI interface.
+                            AmsiCleanedUp = true;
+                            AmsiNativeMethods.AmsiUninitialize(s_amsiContext);
+                            s_amsiContext = IntPtr.Zero;
+                        }
                     }
                 }
             }

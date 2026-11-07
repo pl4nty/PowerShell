@@ -21,6 +21,12 @@ namespace Microsoft.PowerShell
         // not over-optimize this and always create the JumpList as a non-blocking background STA thread instead.
         internal static void CreateRunAsAdministratorJumpList()
         {
+            // Off the startup path: checking the platform reads the registry, and starting an STA thread isn't free.
+            ThreadPool.UnsafeQueueUserWorkItem(static _ => StartJumpListThread(), null);
+        }
+
+        private static void StartJumpListThread()
+        {
             // The STA apartment state is not supported on NanoServer and Windows IoT.
             // Plus, there is not need to create jump list in those environment anyways.
             if (!Platform.IsWindowsDesktop)

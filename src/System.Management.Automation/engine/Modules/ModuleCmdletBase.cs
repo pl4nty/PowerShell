@@ -4773,6 +4773,16 @@ namespace Microsoft.PowerShell.Commands
 
             if (context.EngineSessionState.IsProviderLoaded(context.ProviderNames.FileSystem))
             {
+                // Module loading probes paths that often don't exist (e.g. a nested module DLL next to its manifest
+                // before falling back to $PSHOME); skip a missing literal path without the ItemNotFoundException.
+                if (Path.IsPathFullyQualified(filePath)
+                    && !WildcardPattern.ContainsWildcardCharacters(filePath)
+                    && !File.Exists(filePath)
+                    && !Directory.Exists(filePath))
+                {
+                    return null;
+                }
+
                 try
                 {
                     filePaths =

@@ -646,14 +646,6 @@ namespace System.Management.Automation
         {
             Delegate handlerDelegate = null;
 
-            if (_eventAssembly == null)
-            {
-                _eventAssembly = AssemblyBuilder.DefineDynamicAssembly(
-                    new AssemblyName("PSEventHandler"),
-                    AssemblyBuilderAccess.Run);
-                _eventModule = _eventAssembly.DefineDynamicModule("PSGenericEventModule");
-            }
-
             string engineEventSourceIdentifier = null;
             bool isOnIdleEvent = false;
             // If we are subscribing to an event on an object, generate the supporting delegate
@@ -1370,6 +1362,16 @@ namespace System.Management.Automation
         private Type GenerateEventHandler(MethodInfo invokeSignature)
         {
             int parameterCount = invokeSignature.GetParameters().Length;
+
+            // Created on first use: engine events (such as PowerShell.OnIdle) need no handler type, and creating a
+            // dynamic assembly is slow the first time.
+            if (_eventAssembly == null)
+            {
+                _eventAssembly = AssemblyBuilder.DefineDynamicAssembly(
+                    new AssemblyName("PSEventHandler"),
+                    AssemblyBuilderAccess.Run);
+                _eventModule = _eventAssembly.DefineDynamicModule("PSGenericEventModule");
+            }
 
             // Define the type that will respond to the event. It
             // derives from PSEventHandler so that complex

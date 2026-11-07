@@ -8,6 +8,10 @@
     <TieredCompilation>true</TieredCompilation>
     <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
     <TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
+    <!-- Initializing EventSource slows every startup. This turns off PowerShell's perf-tracing EventSources
+         and .NET's EventSource-based diagnostics (EventCounters, EventListener). Script block logging and the
+         event log use EventProvider, and EventPipe runtime events (dotnet-trace) are native, so both still work. -->
+    <EventSourceSupport>false</EventSourceSupport>
     <RuntimeIdentifiers>win-x86;win-x64</RuntimeIdentifiers>
     <RootNamespace>Microsoft.PowerShell</RootNamespace>
     <ApplicationManifest>..\..\assets\pwsh.manifest</ApplicationManifest>

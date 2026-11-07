@@ -106,8 +106,9 @@ namespace System.Management.Automation.Internal
         // Hyperlink escape sequences. Note: '.*?' makes '.*' do non-greedy match.
         private const string HyperlinkRegex = @"(\x1b\]8;;.*?\x1b\\)";
 
-        // replace regex with .NET 6 API once available
-        internal static readonly Regex AnsiRegex = new Regex($"{GraphicsRegex}|{CsiRegex}|{HyperlinkRegex}", RegexOptions.Compiled);
+        // Interpreted rather than RegexOptions.Compiled: compiling emits and JIT-compiles IL at runtime, which cost the
+        // first decorated host write (usually the prompt), and the strings matched here are short.
+        internal static readonly Regex AnsiRegex = new Regex($"{GraphicsRegex}|{CsiRegex}|{HyperlinkRegex}");
 
         /// <summary>
         /// Get the ranges of all escape sequences in the text.

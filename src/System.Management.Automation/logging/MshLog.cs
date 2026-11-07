@@ -366,7 +366,7 @@ namespace System.Management.Automation
 
             foreach (LogProvider provider in GetLogProvider(executionContext))
             {
-                if (NeedToLogEngineLifecycleEvent(provider, executionContext))
+                if (provider.LifecycleEventsEnabled && NeedToLogEngineLifecycleEvent(provider, executionContext))
                 {
                     provider.LogEngineLifecycleEvent(GetLogContext(executionContext, invocationInfo), engineState, previousState);
                 }
@@ -647,7 +647,7 @@ namespace System.Management.Automation
 
             foreach (LogProvider provider in GetLogProvider(executionContext))
             {
-                if (NeedToLogProviderLifecycleEvent(provider, executionContext))
+                if (provider.LifecycleEventsEnabled && NeedToLogProviderLifecycleEvent(provider, executionContext))
                 {
                     provider.LogProviderLifecycleEvent(GetLogContext(executionContext, null), providerName, providerState);
                 }

@@ -7,8 +7,10 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Tracing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Management.Automation.Configuration;
 using System.Management.Automation.Host;
 using System.Management.Automation.Internal;
 using System.Management.Automation.Language;
@@ -47,10 +49,61 @@ namespace System.Management.Automation.Runspaces
             // Amsi initialize can be a little slow.
             Task.Run(() => AmsiUtils.WinScanContent(content: string.Empty, sourceMetadata: string.Empty, warmUp: true));
 #endif
+
+            // The system lockdown policy (a WDAC query, and an AppLocker test that writes temp scripts) is needed
+            // to create the default session state, which the console host does right after this. It gets its own
+            // thread so it doesn't queue behind the tasks below.
+            Task.Factory.StartNew(
+                static () => SystemPolicy.GetSystemLockdownPolicy(),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+
+            // Creating the first runspace initializes PowerShell's assembly load context, including its type catalog.
+            Task.Run(static () => RuntimeHelpers.RunClassConstructor(typeof(RunspaceBase).TypeHandle));
+
+            // Opening the first local runspace starts the named pipe server for Enter-PSHostProcess, which names
+            // the pipe after this process's start time and creates it with an ACL.
+            Task.Run(static () => RuntimeHelpers.RunClassConstructor(typeof(Remoting.RemoteSessionNamedPipeServer).TypeHandle));
+
+            // Creating the default session state imports the core snap-in once the lockdown policy is known.
+            // Most of that is reading its version info and loading the cmdlet and provider types it lists.
+            Task.Run(static () =>
+            {
+                _ = PSSnapInReader.ReadCoreEngineSnapIn();
+                PSSnapInHelpers.InitializeCoreCmdletsAndProviders(psSnapInInfo: null, out _, out _, helpFile: null);
+            });
+
+            // The first culture-aware string comparison loads ICU's collation data (usually when matching a module's
+            // exported command names), and the first date format its calendar data.
+            Task.Run(static () =>
+            {
+                _ = CultureInfo.CurrentCulture.CompareInfo.Compare("a", "B", CompareOptions.IgnoreCase);
+                _ = DateTime.Now.ToString(CultureInfo.CurrentCulture);
+            });
+
+            // Type initializers needed soon: ScriptDebugger when creating the engine, Tokenizer for the first parse.
+            // The per-user config file is read for policies during command line parsing; reading it early also
+            // warms System.Text.Json. (The system-wide file can be changed by -SettingsFile, so it isn't read here.)
+            Task.Run(static () =>
+            {
+                _ = PowerShellConfig.Instance.GetPowerShellPolicies(ConfigScope.CurrentUser);
+                RuntimeHelpers.RunClassConstructor(typeof(ScriptDebugger).TypeHandle);
+                RuntimeHelpers.RunClassConstructor(typeof(Tokenizer).TypeHandle);
+
+                // Parameter metadata is cached per session, but building it the first time is mostly reflection over
+                // parameter attributes, which warms process-wide. These are the cmdlets an interactive startup runs:
+                // importing PSReadLine, the profile's outputter, and PSConsoleHostReadLine's Set-StrictMode.
+                _ = InternalParameterMetadata.Get(typeof(ImportModuleCommand), context: null, processingDynamicParameters: false);
+                _ = InternalParameterMetadata.Get(typeof(OutDefaultCommand), context: null, processingDynamicParameters: false);
+                _ = InternalParameterMetadata.Get(typeof(SetStrictModeCommand), context: null, processingDynamicParameters: false);
+            });
+
             // Initialize the types 'Compiler', 'CachedReflectionInfo', and 'ExpressionCache'.
             // Their type initializers do a lot of reflection operations.
             // We will access 'Compiler' members when creating the first session state.
-            Task.Run(() => _ = Compiler.DottedLocalsTupleType);
+            // Building the first scope's locals tuple from it is also slow, so do that too.
+            Task.Run(static () => _ = MutableTuple.MakeTuple(Compiler.DottedLocalsTupleType, Compiler.DottedLocalsNameIndexMap));
 
             // One other task for other stuff that's faster, but still a little slow.
             Task.Run(() =>
@@ -3558,6 +3611,13 @@ namespace System.Management.Automation.Runspaces
 
             if (!updateOnly)
             {
+                // The first runspace usually takes the type table startup built in the background
+                if (StartupTypeAndFormatData.TryTakeTypeTable(Types) is TypeTable prebuilt)
+                {
+                    context.TypeTable = prebuilt;
+                    return;
+                }
+
                 context.TypeTable.Clear();
             }
 
@@ -3709,7 +3769,15 @@ namespace System.Management.Automation.Runspaces
 
             if (entries.Count > 0)
             {
-                context.FormatDBManager.UpdateDataBase(entries, context.AuthorizationManager, context.EngineHostInterface, true);
+                // The first runspace usually takes the format database startup built in the background
+                if (!update && StartupTypeAndFormatData.TryTakeFormatDatabase(entries) is Microsoft.PowerShell.Commands.Internal.Format.TypeInfoDataBaseManager prebuilt)
+                {
+                    context.FormatDBManager = prebuilt;
+                }
+                else
+                {
+                    context.FormatDBManager.UpdateDataBase(entries, context.AuthorizationManager, context.EngineHostInterface, true);
+                }
 
                 var allErrors = new StringBuilder("\n");
                 bool hasErrors = false;
@@ -5428,7 +5496,7 @@ end {
         }
 
         [SuppressMessage("StyleCop.CSharp.SpacingRules", "SA1001:CommasMustBeSpacedCorrectly", Justification = "Reviewed.")]
-        private static void InitializeCoreCmdletsAndProviders(
+        internal static void InitializeCoreCmdletsAndProviders(
             PSSnapInInfo psSnapInInfo,
             out Dictionary<string, SessionStateCmdletEntry> cmdlets,
             out Dictionary<string, SessionStateProviderEntry> providers,

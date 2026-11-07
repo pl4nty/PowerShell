@@ -407,7 +407,12 @@ namespace System.Management.Automation
                 // Enumerate all directories, sort by name and select the last. This selects the latest version.
                 var chosenVersionDirectory = Directory.EnumerateDirectories(tempAssemblyDirPath).Order().LastOrDefault();
 
-                if (!string.IsNullOrEmpty(chosenVersionDirectory))
+                // The GAC names version directories after the assembly's identity ('v4.0_<version>_<culture>_<token>'),
+                // so a version too old for the request can be rejected without reading the assembly's metadata. This is
+                // the common case: resource lookups for PowerShell's own assemblies probe for satellites that are only in
+                // the GAC for Windows PowerShell (v3.0.0.0), and the first metadata read is slow.
+                if (!string.IsNullOrEmpty(chosenVersionDirectory)
+                    && !IsGacVersionDirectoryTooOld(Path.GetFileName(chosenVersionDirectory), assemblyName.Version))
                 {
                     // Select first or default as the directory will contain only one assembly. If nothing then default is null;
                     var foundAssemblyPath = Directory.EnumerateFiles(chosenVersionDirectory, $"{assemblyName.Name}*").FirstOrDefault();
@@ -425,6 +430,23 @@ namespace System.Management.Automation
             }
 
             return assemblyFound;
+        }
+
+        /// <summary>
+        /// Whether a GAC version directory's name ('v4.0_3.0.0.0_en_31bf3856ad364e35') names a version older than
+        /// <paramref name="requestedVersion"/>; false if it can't tell.
+        /// </summary>
+        private static bool IsGacVersionDirectoryTooOld(string directoryName, Version requestedVersion)
+        {
+            if (requestedVersion is null)
+            {
+                return false;
+            }
+
+            string[] parts = directoryName.Split('_');
+            return parts.Length >= 4
+                && Version.TryParse(parts[1], out Version directoryVersion)
+                && requestedVersion.CompareTo(directoryVersion) > 0;
         }
 #endif
 

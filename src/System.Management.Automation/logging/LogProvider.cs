@@ -40,6 +40,12 @@ namespace System.Management.Automation
         #region Provider api
 
         /// <summary>
+        /// Whether engine and provider lifecycle events would be written at all. Building their LogContext
+        /// (user name, formatted time, ...) is not free, and a dozen are logged on every startup.
+        /// </summary>
+        internal virtual bool LifecycleEventsEnabled => true;
+
+        /// <summary>
         /// Provider interface function for logging health event.
         /// </summary>
         /// <param name="logContext"></param>
@@ -317,6 +323,11 @@ namespace System.Management.Automation
         internal DummyLogProvider()
         {
         }
+
+        /// <summary>
+        /// Nothing is ever written, so there's no point building a LogContext for it.
+        /// </summary>
+        internal override bool LifecycleEventsEnabled => false;
 
         #region Provider api
 
