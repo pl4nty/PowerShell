@@ -692,14 +692,15 @@ namespace Microsoft.PowerShell.Commands
         }
 
         /// <summary>
-        /// Adds UserName, Description, BinaryPathName, DelayedAutoStart and StartupType to a ServiceController object.
+        /// Adds UserName, Description, BinaryPathName, DelayedAutoStart, StartupType and ProcessId to a ServiceController object.
         /// </summary>
         /// <param name="scManagerHandle">Handle to the local SCManager instance.</param>
         /// <param name="service"></param>
-        /// <returns>ServiceController as PSObject with UserName, Description and StartupType added.</returns>
+        /// <returns>ServiceController as PSObject with the extra properties added.</returns>
         private PSObject AddProperties(nint scManagerHandle, ServiceController service)
         {
             NakedWin32Handle hService = nint.Zero;
+            NakedWin32Handle hStatusService = nint.Zero;
 
             // As these are optional values, a failure due to permissions or
             // other problem is ignored and the properties are set to null.
@@ -707,16 +708,48 @@ namespace Microsoft.PowerShell.Commands
             string? binPath = null;
             string? description = null;
             string? startName = null;
+            int? processId = null;
             ServiceStartupType startupType = ServiceStartupType.InvalidValue;
             try
             {
                 // We don't use service.ServiceHandle as that requests
-                // SERVICE_ALL_ACCESS when we only need SERVICE_QUERY_CONFIG.
+                // SERVICE_ALL_ACCESS when we only need SERVICE_QUERY_CONFIG
+                // and SERVICE_QUERY_STATUS. Request both on one handle first.
                 hService = NativeMethods.OpenServiceW(
                     scManagerHandle,
                     service.ServiceName,
-                    NativeMethods.SERVICE_QUERY_CONFIG
+                    NativeMethods.SERVICE_QUERY_CONFIG | NativeMethods.SERVICE_QUERY_STATUS
                 );
+                if (hService != nint.Zero)
+                {
+                    hStatusService = hService;
+                }
+                else
+                {
+                    // The service DACL can grant one right but not the other.
+                    // Open a handle for each right so that one denied right
+                    // does not hide the properties that the other right gives.
+                    hService = NativeMethods.OpenServiceW(
+                        scManagerHandle,
+                        service.ServiceName,
+                        NativeMethods.SERVICE_QUERY_CONFIG
+                    );
+                    if (hService == nint.Zero)
+                    {
+                        WriteServicePropertyError(service.ServiceName, nameof(NativeMethods.SERVICE_QUERY_CONFIG));
+                    }
+
+                    hStatusService = NativeMethods.OpenServiceW(
+                        scManagerHandle,
+                        service.ServiceName,
+                        NativeMethods.SERVICE_QUERY_STATUS
+                    );
+                    if (hStatusService == nint.Zero)
+                    {
+                        WriteServicePropertyError(service.ServiceName, nameof(NativeMethods.SERVICE_QUERY_STATUS));
+                    }
+                }
+
                 if (hService != nint.Zero)
                 {
                     if (NativeMethods.QueryServiceConfig2(
@@ -761,15 +794,42 @@ namespace Microsoft.PowerShell.Commands
                         WriteServicePropertyError(service.ServiceName, nameof(NativeMethods.QUERY_SERVICE_CONFIG));
                     }
                 }
-                else
+
+                if (hStatusService != nint.Zero)
                 {
-                    // handle when OpenServiceW itself fails:
-                    WriteServicePropertyError(service.ServiceName, nameof(NativeMethods.SERVICE_QUERY_CONFIG));
+                    if (NativeMethods.QueryServiceStatusEx(
+                        hStatusService,
+                        NativeMethods.SC_STATUS_PROCESS_INFO,
+                        out NativeMethods.SERVICE_STATUS_PROCESS statusInfo,
+                        (DWORD)Marshal.SizeOf<NativeMethods.SERVICE_STATUS_PROCESS>(),
+                        out _))
+                    {
+                        // The SCM reports 0 when no process hosts the service
+                        // (for example, when it is stopped). PID 0 is the System
+                        // Idle Process, so report null to prevent a wrong match.
+                        // The value is not filtered by state: a PID in a pending
+                        // state can be stale, but it is the value that is needed
+                        // to stop a service that does not respond.
+                        if (statusInfo.dwProcessId != 0)
+                        {
+                            processId = unchecked((int)statusInfo.dwProcessId);
+                        }
+                    }
+                    else
+                    {
+                        WriteServicePropertyError(service.ServiceName, nameof(NativeMethods.SERVICE_STATUS_PROCESS));
+                    }
                 }
             }
             finally
             {
-                if (hService != IntPtr.Zero)
+                if (hStatusService != nint.Zero && hStatusService != hService)
+                {
+                    bool succeeded = NativeMethods.CloseServiceHandle(hStatusService);
+                    Diagnostics.Assert(succeeded, "Failed to close service handle");
+                }
+
+                if (hService != nint.Zero)
                 {
                     bool succeeded = NativeMethods.CloseServiceHandle(hService);
                     Diagnostics.Assert(succeeded, "Failed to close service handle");
@@ -796,6 +856,10 @@ namespace Microsoft.PowerShell.Commands
             noteProperty = new PSNoteProperty("StartupType", startupType);
             serviceAsPSObj.Properties.Add(noteProperty, true);
             serviceAsPSObj.TypeNames.Insert(0, "System.Service.ServiceController#StartupType");
+
+            noteProperty = new PSNoteProperty("ProcessId", processId);
+            serviceAsPSObj.Properties.Add(noteProperty, true);
+            serviceAsPSObj.TypeNames.Insert(0, "System.Service.ServiceController#ProcessId");
 
             return serviceAsPSObj;
         }
@@ -2649,6 +2713,8 @@ namespace Microsoft.PowerShell.Commands
         internal const DWORD SC_MANAGER_ALL_ACCESS = 0xf003f;
         internal const DWORD SERVICE_QUERY_CONFIG = 1;
         internal const DWORD SERVICE_CHANGE_CONFIG = 2;
+        internal const DWORD SERVICE_QUERY_STATUS = 4;
+        internal const DWORD SC_STATUS_PROCESS_INFO = 0;
         internal const DWORD SERVICE_DELETE = 0x10000;
         internal const DWORD SERVICE_NO_CHANGE = 0xffffffff;
         internal const DWORD SERVICE_AUTO_START = 0x2;
@@ -2694,6 +2760,16 @@ namespace Microsoft.PowerShell.Commands
             NakedWin32Handle hService,
             DWORD dwInfoLevel,
             IntPtr lpBuffer,
+            DWORD cbBufSize,
+            out DWORD pcbBytesNeeded
+            );
+
+        [DllImport(PinvokeDllNames.QueryServiceStatusExDllName, CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern
+        bool QueryServiceStatusEx(
+            NakedWin32Handle hService,
+            DWORD InfoLevel,
+            out SERVICE_STATUS_PROCESS lpBuffer,
             DWORD cbBufSize,
             out DWORD pcbBytesNeeded
             );
@@ -2753,6 +2829,20 @@ namespace Microsoft.PowerShell.Commands
             [MarshalAs(UnmanagedType.LPWStr)] internal string lpDependencies;
             [MarshalAs(UnmanagedType.LPWStr)] internal string lpServiceStartName;
             [MarshalAs(UnmanagedType.LPWStr)] internal string lpDisplayName;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SERVICE_STATUS_PROCESS
+        {
+            internal uint dwServiceType;
+            internal uint dwCurrentState;
+            internal uint dwControlsAccepted;
+            internal uint dwWin32ExitCode;
+            internal uint dwServiceSpecificExitCode;
+            internal uint dwCheckPoint;
+            internal uint dwWaitHint;
+            internal uint dwProcessId;
+            internal uint dwServiceFlags;
         }
 
         [StructLayout(LayoutKind.Sequential)]

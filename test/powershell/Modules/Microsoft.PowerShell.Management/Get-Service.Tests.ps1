@@ -118,6 +118,35 @@ Describe 'Get-Service Admin tests' -Tag CI,RequireAdminOnWindows {
     $actual.StartupType | Should -Be Manual
   }
 
+  It "Returns null ProcessId for a stopped service" {
+    $actual = Get-Service -Name $service.Name -ErrorAction Stop
+
+    $actual.Status | Should -Be Stopped
+    $actual.ProcessId | Should -BeNullOrEmpty
+  }
+
+  It "Ignores no SERVICE_QUERY_STATUS access" {
+    $sddl = ((sc.exe sdshow $service.Name) -join "").Trim()
+    $sd = ConvertFrom-SddlString -Sddl $sddl
+    $sd.RawDescriptor.DiscretionaryAcl.AddAccess(
+      [System.Security.AccessControl.AccessControlType]::Deny,
+      [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+      0x4,  # SERVICE_QUERY_STATUS
+      [System.Security.AccessControl.InheritanceFlags]::None,
+      [System.Security.AccessControl.PropagationFlags]::None)
+    $newSddl = $sd.RawDescriptor.GetSddlForm([System.Security.AccessControl.AccessControlSections]::All)
+    $null = sc.exe sdset $service.Name $newSddl
+
+    # -Name reads ServiceController.Status, which needs SERVICE_QUERY_STATUS.
+    # -InputObject does not, so it tests only the extra properties.
+    $actual = Get-Service -InputObject $service -ErrorAction Stop
+
+    $actual.Name | Should -Be $service.Name
+    $actual.ProcessId | Should -BeNullOrEmpty
+    $actual.UserName | Should -Be LocalSystem
+    $actual.StartupType | Should -Be Manual
+  }
+
   It "Ignores no SERVICE_QUERY_CONFIG access" {
     $sddl = ((sc.exe sdshow $service.Name) -join "").Trim()
     $sd = ConvertFrom-SddlString -Sddl $sddl
@@ -137,5 +166,34 @@ Describe 'Get-Service Admin tests' -Tag CI,RequireAdminOnWindows {
     $actual.Description | Should -BeNullOrEmpty
     $actual.UserName | Should -BeNullOrEmpty
     $actual.StartupType | Should -Be InvalidValue
+  }
+}
+
+Describe 'Get-Service ProcessId tests' -Tag CI {
+  BeforeAll {
+    $originalDefaultParameterValues = $PSDefaultParameterValues.Clone()
+    if ( -not $IsWindows ) {
+        $PSDefaultParameterValues["it:skip"] = $true
+    }
+  }
+  AfterAll {
+      $global:PSDefaultParameterValues = $originalDefaultParameterValues
+  }
+
+  It "Returns the host process ID for a running service" {
+    # RpcSs always runs on Windows and does not need admin rights to query.
+    $actual = Get-Service -Name RpcSs -ErrorAction Stop
+
+    $actual.Status | Should -Be Running
+    $actual.ProcessId | Should -BeOfType [int]
+    $actual.ProcessId | Should -BeGreaterThan 0
+    (Get-Process -Id $actual.ProcessId).Name | Should -Be svchost
+  }
+
+  It "Returns the same ProcessId as Win32_Service" {
+    $actual = Get-Service -Name RpcSs -ErrorAction Stop
+    $expected = Get-CimInstance -ClassName Win32_Service -Filter "Name='RpcSs'"
+
+    $actual.ProcessId | Should -Be $expected.ProcessId
   }
 }
